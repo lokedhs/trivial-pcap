@@ -68,43 +68,72 @@
          (close-pcap ,pcap-sym)))))
 
 (defclass packet ()
-  ((ts      :type number
-            :initarg :ts
-            :reader packet/ts)
-   (length  :type integer
-            :initarg :length
-            :reader packet/length)
-   (caplen  :type integer
-            :initarg :caplen
-            :reader packet/caplen)
-   (content :type t
-            :initarg :content)))
+  ((header    :type t
+              :initarg :header
+              :reader packet/header)
+   (content   :type t
+              :initarg :content
+              :reader packet/content)
+   (need-free :type t
+              :initarg :need-free
+              :reader packet/need-free)
+   (active    :type t
+              :initform t
+              :accessor packet/active)))
 
-(defmethod print-object ((obj packet) stream)
-  (print-unreadable-object (obj stream :type t)
-    (let ((ts (packet/ts obj)))
-      (format stream "TS ~ds~s LENGTH ~a" (truncate ts) (mod (* ts 1000000) 1000000) (packet/length obj)))))
+(defgeneric packet/ts (packet)
+  (:method ((packet packet))
+    (make-timestamp (cffi:foreign-slot-value (packet/header packet) '(:struct pcap-pkthdr) 'ts))))
+
+(defgeneric packet/length (packet)
+  (:method ((packet packet))
+    (cffi:foreign-slot-value (packet/header packet) '(:struct pcap-pkthdr) 'len)))
+
+(defgeneric packet/caplen (packet)
+  (:method ((packet packet))
+    (cffi:foreign-slot-value (packet/header packet) '(:struct pcap-pkthdr) 'caplen)))
 
 (defun make-timestamp (timestamp)
   (let ((sec (getf timestamp 'tv-sec))
         (usec (getf timestamp 'tv-usec)))
     (+ sec (/ usec 1000000))))
 
-(defun next-pcap (pcap)
+(defun alloc-and-copy (ptr size)
+  (let ((buf (cffi:foreign-alloc :char :count size)))
+    (loop
+      for i from 0 below size
+      do (setf (cffi:mem-aref buf :char i) (cffi:mem-aref ptr :char i)))
+    buf))
+
+(defun next-pcap (pcap &key (copy-packet nil))
   (check-type pcap pcap)
   (cffi:with-foreign-objects ((header-ref '(:pointer (:struct pcap-pkthdr)))
                               (content-ref '(:pointer u-char)))
     (let ((res (pcap-next-ex-internal (pcap/ptr pcap) header-ref content-ref)))
       (ecase res
         (0 nil)
-        (1 (let ((header (cffi:mem-ref header-ref '(:pointer (:struct pcap-pkthdr)))))
-             (make-instance 'packet
-                            :ts (make-timestamp (cffi:foreign-slot-value header '(:struct pcap-pkthdr) 'ts))
-                            :length (cffi:foreign-slot-value header '(:struct pcap-pkthdr) 'len)
-                            :caplen (cffi:foreign-slot-value header '(:struct pcap-pkthdr) 'caplen)
-                            :content (cffi:mem-ref content-ref '(:pointer u-char)))))
+        (1 (labels ((maybe-copy (ptr size)
+                      (if copy-packet
+                          (alloc-and-copy ptr size)
+                          ptr)))
+             (let* ((header (cffi:mem-ref header-ref '(:pointer (:struct pcap-pkthdr)))))
+               (make-instance 'packet
+                              :header (maybe-copy header (cffi:foreign-type-size '(:struct pcap-pkthdr)))
+                              :content (maybe-copy (cffi:mem-ref content-ref '(:pointer u-char))
+                                                   (cffi:foreign-slot-value header '(:struct pcap-pkthdr) 'len))
+                              :need-free copy-packet))))
         (-1 (error 'pcap-error :message (pcap-geterr-internal (pcap/ptr pcap))))
         (-2 (error 'pcap-error :message "No matching packets found"))))))
+
+(defun packet-free (packet)
+  (check-type packet packet)
+  (unless (packet/need-free packet)
+    (error "Packet refers to internal pcap memory. It should not be freed."))
+  (unless (packet/active packet)
+    (error "This packet is no longer active."))
+  (cffi:foreign-free (packet/header packet))
+  (cffi:foreign-free (packet/content packet))
+  (setf (packet/active packet) nil))
 
 (defclass pcap-stats ()
   ((recv   :type integer
@@ -156,6 +185,16 @@
               (let ((,symbol ,program-sym))
                 ,@body)
            (freecode ,program-sym))))))
+
+(defun offline-filter (program packet)
+  (check-type program compiled-program)
+  (check-type packet packet)
+  (let ((res (pcap-offline-filter-internal (compiled-program/ptr program)
+                                           (packet/header packet)
+                                           (packet/content packet))))
+    (if (zerop res)
+        nil
+        t)))
 
 (defun setfilter (pcap filter)
   (check-type pcap pcap)

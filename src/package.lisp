@@ -19,4 +19,6 @@
            #:is-swapped
            #:major-version
            #:minor-version
-           #:with-compiled-program))
+           #:with-compiled-program
+           #:offline-filter
+           #:packet-free))

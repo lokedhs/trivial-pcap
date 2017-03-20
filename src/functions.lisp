@@ -43,6 +43,11 @@
 (cffi:defcfun ("pcap_freecode" pcap-freecode-internal) :void
   (program (:pointer (:struct bpf-program))))
 
+(cffi:defcfun ("pcap_offline_filter" pcap-offline-filter-internal) :int
+  (program (:pointer (:struct bpf-program)))
+  (h (:pointer (:struct pcap-pkthdr)))
+  (pkt (:pointer u-char)))
+
 (cffi:defcfun ("pcap_setfilter" pcap-setfilter-internal) :int
   (pcap :pointer)
   (bpf-program (:pointer (:struct bpf-program))))
